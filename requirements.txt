@@ -1,0 +1,9 @@
+pandas
+openpyxl
+exa-py
+google-genai
+python-dotenv
+loguru
+streamlit
+python-docx
+openai
