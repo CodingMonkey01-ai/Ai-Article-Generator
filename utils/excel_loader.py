@@ -1,24 +1,45 @@
 import pandas as pd
 from datetime import datetime
+import os
 
 
-def load_keywords_with_dates(excel_path):
-    """
-    Load keywords with their fetch dates from Excel.
-    Returns list of dicts: [{"keyword": str, "fetch_date": str or None}, ...]
-    """
-    df = pd.read_excel(excel_path)
+def safe_read_excel(excel_path):
+    """Read the keyword workbook safely and normalize expected columns."""
 
-    # Ensure fetch_date column exists
+    import os
+    import pandas as pd
+
+    if not os.path.exists(excel_path) or os.path.getsize(excel_path) == 0:
+        return pd.DataFrame(columns=["keyword", "fetch_date"])
+
+    try:
+        df = pd.read_excel(excel_path, engine="openpyxl")
+    except Exception:
+        return pd.DataFrame(columns=["keyword", "fetch_date"])
+
+    # ✅ FIXED HERE
+    df.columns = df.columns.map(lambda x: str(x).strip().lower())
+
+    # Ensure required columns exist
+    if "keyword" not in df.columns:
+        df["keyword"] = None
+
     if "fetch_date" not in df.columns:
         df["fetch_date"] = None
+
+    return df
+
+def load_keywords_with_dates(excel_path):
+    """Load keyword records with fetch dates from the Excel store."""
+
+    df = safe_read_excel(excel_path)
 
     keywords_data = []
     for _, row in df.iterrows():
         keyword = row.get("keyword")
         if pd.notna(keyword):
             fetch_date = row.get("fetch_date")
-            # Convert to string format if it's a datetime
+
             if pd.notna(fetch_date):
                 if isinstance(fetch_date, datetime):
                     fetch_date = fetch_date.strftime("%Y-%m-%d")
@@ -36,45 +57,27 @@ def load_keywords_with_dates(excel_path):
 
 
 def update_fetch_dates(excel_path, keywords_to_update: list):
-    """
-    Update fetch dates for keywords that got news.
-    keywords_to_update: list of keyword strings to update with today's date
-    """
-    df = pd.read_excel(excel_path)
+    """Update fetch dates for the supplied keywords in the Excel store."""
 
-    # Ensure fetch_date column exists
-    if "fetch_date" not in df.columns:
-        df["fetch_date"] = None
+    df = safe_read_excel(excel_path)
 
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Update fetch_date for specified keywords
     for keyword in keywords_to_update:
         mask = df["keyword"].astype(str).str.strip() == keyword
         df.loc[mask, "fetch_date"] = today
 
-    # Save back to Excel
     df.to_excel(excel_path, index=False)
 
     return len(keywords_to_update)
 
 
 def add_keywords_to_excel(excel_path, new_keywords: list):
-    """
-    Add new keywords to Excel file.
-    new_keywords: list of keyword strings to add
-    Returns number of keywords added.
-    """
-    import os
+    """Append unique keywords to the Excel store."""
 
-    if os.path.exists(excel_path):
-        df = pd.read_excel(excel_path)
-        if "fetch_date" not in df.columns:
-            df["fetch_date"] = None
-    else:
-        df = pd.DataFrame(columns=["keyword", "fetch_date"])
+    df = safe_read_excel(excel_path)
 
-    existing_keywords = set(df["keyword"].astype(str).str.strip().tolist())
+    existing_keywords = set(clean_keyword_series(df["keyword"]).tolist())
     added_count = 0
 
     for kw in new_keywords:
@@ -90,16 +93,10 @@ def add_keywords_to_excel(excel_path, new_keywords: list):
 
 
 def remove_keyword_from_excel(excel_path, keyword: str):
-    """
-    Remove a keyword from Excel file.
-    Returns True if keyword was removed, False if not found.
-    """
-    import os
+    """Remove a single keyword from the Excel store."""
 
-    if not os.path.exists(excel_path):
-        return False
+    df = safe_read_excel(excel_path)
 
-    df = pd.read_excel(excel_path)
     initial_len = len(df)
 
     df = df[df["keyword"].astype(str).str.strip() != keyword.strip()]
@@ -112,12 +109,8 @@ def remove_keyword_from_excel(excel_path, keyword: str):
 
 
 def expand_keywords_with_modifiers(keywords: list) -> list:
-    """
-    Break down keywords by appending market modifiers.
-    For each keyword, creates variations with: fall, demand, supply, rise.
+    """Expand each keyword with the default modifier set."""
 
-    Example: "gold" -> ["gold fall", "gold demand", "gold supply", "gold rise"]
-    """
     modifiers = ["fall", "demand", "supply", "rise"]
     expanded = []
     for kw in keywords:
@@ -128,10 +121,13 @@ def expand_keywords_with_modifiers(keywords: list) -> list:
             expanded.append(f"{kw} {mod}")
     return expanded
 
+def clean_keyword_series(series):
+    """Normalize a pandas keyword series into stripped string values."""
+
+    return series.astype(str).str.strip().replace("nan", "")
 
 def load_keywords(excel_path):
-    """
-    Legacy function - returns just keyword list for backward compatibility.
-    """
-    df = pd.read_excel(excel_path)
-    return df["keyword"].dropna().unique().tolist()
+    """Load unique keyword strings from the Excel store."""
+
+    df = safe_read_excel(excel_path)
+    return df["keyword"].astype(str).str.strip().replace("nan", "").dropna().unique().tolist()

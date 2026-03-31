@@ -1,9 +1,23 @@
 import os
 import re
+from datetime import datetime
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
+
+
+def _build_output_path(filename: str) -> str:
+    """Build the default DOCX output path for a generated article."""
+
+    return os.path.join("output", "articles", f"{filename}.docx")
+
+
+def _fallback_output_path(filename: str) -> str:
+    """Build a timestamped fallback path when the default file is locked."""
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join("output", "articles", f"{filename}_{timestamp}.docx")
 
 def save_article(article_text: str, filename: str, image_path: str = None) -> str:
     """
@@ -18,7 +32,7 @@ def save_article(article_text: str, filename: str, image_path: str = None) -> st
     - Clean paragraph spacing
     """
 
-    path = f"output/articles/{filename}.docx"
+    path = _build_output_path(filename)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     doc = Document()
@@ -236,5 +250,10 @@ def save_article(article_text: str, filename: str, image_path: str = None) -> st
     # -----------------------------
     # Save Document
     # -----------------------------
-    doc.save(path)
-    return path
+    try:
+        doc.save(path)
+        return path
+    except PermissionError:
+        fallback_path = _fallback_output_path(filename)
+        doc.save(fallback_path)
+        return fallback_path

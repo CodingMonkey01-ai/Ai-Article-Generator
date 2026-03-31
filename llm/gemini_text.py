@@ -1,17 +1,26 @@
-import json
+import re
+import time
 from langfuse import observe
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from google import genai
+from google.genai.types import (
+    HarmCategory,
+    HarmBlockThreshold,
+    GenerateContentConfig
+)
 from config.settings import GEMINI_API_KEY
 
-genai.configure(api_key=GEMINI_API_KEY)
+# -------------------------------
+# CONFIG
+# -------------------------------
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Use flash model for quick tasks (relevance checking) - faster & cheaper
-flash_model = genai.GenerativeModel("gemini-2.0-flash")
+MODEL = "gemini-2.5-flash"
+MAX_RETRIES = 5
 
-# Use pro model for article generation - better quality
-pro_model = genai.GenerativeModel("gemini-2.5-pro")
 
+# -------------------------------
+# SAFETY SETTINGS (FIXED)
+# -------------------------------
 safety_settings = [
     {"category": HarmCategory.HARM_CATEGORY_HARASSMENT, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
     {"category": HarmCategory.HARM_CATEGORY_HATE_SPEECH, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH},
@@ -23,165 +32,152 @@ civic_attr = getattr(HarmCategory, "HARM_CATEGORY_CIVIC_INTEGRITY", None)
 if civic_attr is not None:
     safety_settings.append({"category": civic_attr, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH})
 
+
+# -------------------------------
+# SIMPLE FILTER (NO GEMINI)
+# -------------------------------
+def filter_relevant_news(keyword: str, news_list: list, top_n: int = 5):
+    """Select the news items whose titles best match the keyword."""
+
+    keyword = keyword.lower()
+
+    filtered = [
+        n for n in news_list
+        if keyword in n["title"].lower()
+    ]
+
+    if not filtered:
+        filtered = news_list[:top_n]
+
+    return filtered[:top_n]
+
+
+# -------------------------------
+# ARTICLE PROMPT
+# -------------------------------
 ARTICLE_PROMPT = """You are a B2B content strategist. Generate an SEO-optimized blog article.
 
 KEYWORD: "{keyword}"
-TOPIC: "{news_title}"
 
-SOURCE DATA (from multiple news sources - extract the BEST and most relevant content from each):
-{web_content}
+HEADLINES:
+{headlines}
 
 INSTRUCTIONS:
-1. Analyze ALL provided sources carefully
-2. Extract the most valuable, accurate, and relevant information from EACH source
-3. Combine insights to create a comprehensive, well-rounded article
-4. Prioritize facts, statistics, quotes, and unique perspectives from different sources
-5. Synthesize information - don't just copy, create original flowing content
+1. Analyze ALL headlines carefully
+2. Infer trends and insights from them
+3. Combine information into a comprehensive article
+4. Add realistic data, stats, and industry insights
 
-OUTPUT FORMAT (exactly):
+OUTPUT FORMAT:
 
-SEO Title: (50-60 chars, include keyword)
+SEO Title:
+Meta Description:
+Title:
 
-Meta Description: (120-150 chars)
-
-Title: (50-60 chars)
-
-[Introduction: 1-2 paragraphs, 80-120 words answering What/Who/Where/When/Why/How]
+Introduction
 
 Key Insights:
-- [4-5 bullet points, 1-2 lines each - combine best insights from all sources]
+- Point 1
+- Point 2
+- Point 3
+- Point 4
 
-## [H2 Heading with keyword]
+## Main Section
+Content
 
-[Paragraph 70-90 words]
-
-### [H3 Subheading]
-
-[Paragraph 70-90 words]
-
-## [H2 Heading]
-
-[Paragraph 70-90 words]
-
-### [H3 Subheading]
-
-[Paragraph 70-90 words]
-
-[Continue with 8-10 total paragraphs]
+## Another Section
+Content
 
 ### FAQs
+Q1:
+A:
 
-Q1: [Question]
-A: [2-3 sentences]
+Q2:
+A:
 
-Q2: [Question]
-A: [2-3 sentences]
-
-Q3: [Question]
-A: [2-3 sentences]
-
----
-**Author:** [Professional bio, 2-3 lines]
+Q3:
+A:
 
 RULES:
-- 800-1200 words total
-- Use keyword 5-7 times naturally
-- No links, citations, or source mentions
-- Professional, data-driven tone
-- Short paragraphs (3-4 sentences max)
-- Combine the BEST content from ALL provided sources into one cohesive article
+- 800-1200 words
+- Professional tone
+- No links
+"""
 
-Generate the article now:"""
 
-BATCH_RELEVANCE_PROMPT = """Score how relevant each news title is to the keyword. Return ONLY a JSON array.
+def _parse_retry_delay_seconds(error_message: str) -> int | None:
+    """Extract a retry delay in seconds from a provider error message."""
 
-KEYWORD: "{keyword}"
+    match = re.search(r"retry in ([\d.]+)s", error_message, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return max(1, int(float(match.group(1))))
 
-TITLES:
-{titles_list}
 
-Return JSON array with scores for each title:
-[{{"index": 0, "confidence": 0.0-1.0}}, {{"index": 1, "confidence": 0.0-1.0}}, ...]
+def _classify_generation_error(error_message: str) -> tuple[bool, str, int | None]:
+    """Classify Gemini text errors into retryable and non-retryable cases."""
 
-Rules:
-- confidence: 0.0 = not relevant, 1.0 = highly relevant
-- Be strict: only high scores for titles directly about the keyword
-- Return ONLY the JSON array, no other text"""
+    lowered = error_message.lower()
+    retry_after = _parse_retry_delay_seconds(error_message)
 
+    if "quota exceeded" in lowered or "billing details" in lowered:
+        return False, (
+            f"Gemini text quota exhausted for model '{MODEL}'. "
+            "Wait for quota reset, switch to a paid plan, or change to another model."
+        ), retry_after
+
+    if "resource_exhausted" in lowered or "429" in lowered:
+        return True, "Gemini text rate limited.", retry_after
+
+    if "503" in lowered or "unavailable" in lowered or "high demand" in lowered:
+        return True, "Gemini text model is temporarily unavailable due to high demand.", retry_after
+
+    return False, f"Gemini text generation failed: {error_message}", None
+
+
+# -------------------------------
+# MAIN ARTICLE GENERATION (1 CALL)
+# -------------------------------
 @observe()
-def get_relevant_news_list(keyword: str, news_list: list, min_confidence: float = 0.4) -> list:
-    """
-    Find all news articles above min_confidence using batch relevance check.
-    Uses a single API call to check all titles at once.
-    Returns list of articles with confidence > min_confidence (40% default).
-    """
+def generate_article_from_news(keyword: str, news_list: list) -> dict:
+    """Generate an article from RSS headlines for a single keyword."""
+
     if not news_list:
-        return []
+        return {"article": "", "error": "No news available for article generation."}
 
-    # Build titles list for batch processing
-    titles_list = "\n".join([f"{i}. {news['title']}" for i, news in enumerate(news_list)])
+    filtered_news = filter_relevant_news(keyword, news_list)
 
-    prompt = BATCH_RELEVANCE_PROMPT.format(
-        keyword=keyword,
-        titles_list=titles_list
-    )
+    headlines = "\n".join([f"- {n['title']}" for n in filtered_news])
 
-    try:
-        response = flash_model.generate_content(
-            prompt,
-            generation_config={"temperature": 0, "max_output_tokens": 500},
-            safety_settings=safety_settings,
-        )
-
-        result_text = response.text.strip()
-        # Clean markdown if present
-        if result_text.startswith("```"):
-            result_text = result_text.split("```")[1]
-            if result_text.startswith("json"):
-                result_text = result_text[4:]
-        result_text = result_text.strip()
-
-        scores = json.loads(result_text)
-
-        # Collect all matches above min_confidence
-        relevant_news = []
-
-        for score in scores:
-            idx = score.get("index", -1)
-            confidence = float(score.get("confidence", 0))
-
-            if 0 <= idx < len(news_list) and confidence >= min_confidence:
-                news_item = news_list[idx].copy()
-                news_item["confidence"] = confidence
-                news_item["keyword"] = keyword
-                relevant_news.append(news_item)
-
-        # Sort by confidence descending
-        relevant_news.sort(key=lambda x: x["confidence"], reverse=True)
-
-        print(f"Found {len(relevant_news)} relevant articles for '{keyword}' (confidence >= {min_confidence})")
-
-        return relevant_news
-
-    except Exception as e:
-        print(f"Batch relevance check failed: {e}")
-        return []
-
-
-@observe()
-def generate_article_from_web_search(keyword: str, news_title: str, web_content: str = "") -> str:
-    """
-    Generate an article based on keyword, news title, and web search content.
-    """
     prompt = ARTICLE_PROMPT.format(
         keyword=keyword,
-        news_title=news_title,
-        web_content=web_content[:15000] if web_content else "Use your knowledge to create accurate content."
+        headlines=headlines
     )
 
-    response = pro_model.generate_content(
-        prompt,
-        generation_config={"temperature": 0.3, "max_output_tokens": 4096},
-        safety_settings=safety_settings,
-    )
-    return response.text
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=4096,
+                    safety_settings=safety_settings  # ✅ FIXED HERE
+                ),
+            )
+
+            return {"article": response.text or "", "error": None}
+
+        except Exception as e:
+            should_retry, error_message, retry_after = _classify_generation_error(str(e))
+
+            if should_retry and attempt < MAX_RETRIES - 1:
+                wait = retry_after or min(60, 5 * (2 ** attempt))
+                print(f"Text generation temporary failure, retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+
+            print(f"Article generation failed: {e}")
+            return {"article": "", "error": error_message}
+
+    return {"article": "", "error": "Gemini text generation failed after repeated retries."}

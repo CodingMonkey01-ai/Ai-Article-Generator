@@ -6,7 +6,8 @@ load_dotenv()
 
 EXA_API_KEY = os.getenv("EXA_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OpenAI_API_KEY = os.getenv("OpenAI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+# OpenAI_API_KEY = os.getenv("OpenAI_API_KEY")
 
 # Langfuse keys should also come from env, not hardcoded
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
