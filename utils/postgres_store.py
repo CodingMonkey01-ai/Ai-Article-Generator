@@ -1,25 +1,29 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg
 
 from config.settings import DATABASE_URL
-
+from utils.keyword_utils import expand_keywords_with_modifiers, normalize_keyword, normalize_keywords
 
 def postgres_enabled() -> bool:
     """Return whether Postgres has been configured for the project."""
 
     return bool(DATABASE_URL)
 
+def require_postgres() -> None:
+    """Raise when Postgres is required but DATABASE_URL is missing."""
+
+    if not postgres_enabled():
+        raise RuntimeError("DATABASE_URL is not configured.")
 
 @contextmanager
 def get_connection():
     """Yield a live psycopg connection using the configured database URL."""
 
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not configured.")
+    require_postgres()
 
     conn = psycopg.connect(DATABASE_URL)
     try:
@@ -61,20 +65,12 @@ def init_db() -> None:
             )
         conn.commit()
 
-
 def add_keywords(keywords: list[str]) -> list[dict]:
     """Insert or upsert keyword rows and return their stored metadata."""
 
-    if not postgres_enabled():
-        raise RuntimeError("DATABASE_URL is not configured.")
+    require_postgres()
 
-    cleaned = []
-    seen = set()
-    for keyword in keywords:
-        value = str(keyword).strip()
-        if value and value not in seen:
-            cleaned.append(value)
-            seen.add(value)
+    cleaned = normalize_keywords(keywords)
 
     if not cleaned:
         return []
@@ -99,18 +95,17 @@ def add_keywords(keywords: list[str]) -> list[dict]:
 
     return created_rows
 
-
 def update_keyword_fetch_date(keyword: str, fetch_date: datetime | str | None = None) -> None:
     """Update the stored fetch date for a keyword."""
 
     if not postgres_enabled():
         return
 
-    value = keyword.strip()
+    value = normalize_keyword(keyword)
     if not value:
         return
 
-    fetch_value = fetch_date or datetime.utcnow().date()
+    fetch_value = fetch_date or datetime.now(timezone.utc).date()
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -124,14 +119,12 @@ def update_keyword_fetch_date(keyword: str, fetch_date: datetime | str | None = 
             )
         conn.commit()
 
-
 def save_document(keyword: str, filename: str, file_path: str, article_text: str) -> dict:
     """Insert or update a generated document for a keyword."""
 
-    if not postgres_enabled():
-        raise RuntimeError("DATABASE_URL is not configured.")
+    require_postgres()
 
-    value = keyword.strip()
+    value = normalize_keyword(keyword)
     if not value:
         raise ValueError("Keyword is required.")
 
@@ -167,14 +160,12 @@ def save_document(keyword: str, filename: str, file_path: str, article_text: str
 
     return _document_row_to_dict(row=row)
 
-
 def get_documents_by_keyword(keyword: str) -> list[dict]:
     """Fetch documents for a keyword using exact then partial matching."""
 
-    if not postgres_enabled():
-        raise RuntimeError("DATABASE_URL is not configured.")
+    require_postgres()
 
-    search_value = keyword.strip()
+    search_value = normalize_keyword(keyword)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -206,15 +197,34 @@ def get_documents_by_keyword(keyword: str) -> list[dict]:
     return [_document_row_to_dict(row=row) for row in rows]
 
 
+def get_keywords() -> list[dict]:
+    """Fetch all stored keywords ordered alphabetically."""
+
+    require_postgres()
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, keyword, fetch_date, created_at
+                FROM keywords
+                ORDER BY keyword ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    return [_keyword_row_to_dict(row=row) for row in rows]
+
 def delete_keyword_and_documents(keyword: str) -> dict:
     """Delete a keyword family and cascade-delete all linked documents."""
 
-    if not postgres_enabled():
-        raise RuntimeError("DATABASE_URL is not configured.")
+    require_postgres()
 
-    search_value = keyword.strip()
+    search_value = normalize_keyword(keyword)
     if not search_value:
         raise ValueError("Keyword is required.")
+
+    keyword_family = [search_value, *expand_keywords_with_modifiers([search_value])]
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -230,11 +240,11 @@ def delete_keyword_and_documents(keyword: str) -> dict:
                 ORDER BY k.keyword ASC
                 """,
                 (
-                    search_value,
-                    f"{search_value} fall",
-                    f"{search_value} rise",
-                    f"{search_value} supply",
-                    f"{search_value} demand",
+                    keyword_family[0],
+                    keyword_family[1],
+                    keyword_family[2],
+                    keyword_family[3],
+                    keyword_family[4],
                 ),
             )
             rows = cur.fetchall()
@@ -263,7 +273,6 @@ def delete_keyword_and_documents(keyword: str) -> dict:
         "documents_deleted": sum(row[2] for row in rows),
     }
 
-
 def _keyword_row_to_dict(row) -> dict:
     """Convert a raw keyword query row into an API-friendly dictionary."""
 
@@ -273,7 +282,6 @@ def _keyword_row_to_dict(row) -> dict:
         "fetch_date": row[2].isoformat() if row[2] else None,
         "created_at": row[3].isoformat() if row[3] else None,
     }
-
 
 def _document_row_to_dict(row) -> dict:
     """Convert a raw document query row into an API-friendly dictionary."""

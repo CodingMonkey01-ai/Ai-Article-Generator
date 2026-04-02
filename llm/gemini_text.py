@@ -1,4 +1,3 @@
-import re
 import time
 from langfuse import observe
 from google import genai
@@ -8,6 +7,7 @@ from google.genai.types import (
     GenerateContentConfig
 )
 from config.settings import GEMINI_API_KEY
+from utils.retry_utils import parse_retry_delay_seconds
 
 # -------------------------------
 # CONFIG
@@ -31,25 +31,6 @@ safety_settings = [
 civic_attr = getattr(HarmCategory, "HARM_CATEGORY_CIVIC_INTEGRITY", None)
 if civic_attr is not None:
     safety_settings.append({"category": civic_attr, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH})
-
-
-# -------------------------------
-# SIMPLE FILTER (NO GEMINI)
-# -------------------------------
-def filter_relevant_news(keyword: str, news_list: list, top_n: int = 5):
-    """Select the news items whose titles best match the keyword."""
-
-    keyword = keyword.lower()
-
-    filtered = [
-        n for n in news_list
-        if keyword in n["title"].lower()
-    ]
-
-    if not filtered:
-        filtered = news_list[:top_n]
-
-    return filtered[:top_n]
 
 
 # -------------------------------
@@ -104,21 +85,11 @@ RULES:
 - No links
 """
 
-
-def _parse_retry_delay_seconds(error_message: str) -> int | None:
-    """Extract a retry delay in seconds from a provider error message."""
-
-    match = re.search(r"retry in ([\d.]+)s", error_message, flags=re.IGNORECASE)
-    if not match:
-        return None
-    return max(1, int(float(match.group(1))))
-
-
 def _classify_generation_error(error_message: str) -> tuple[bool, str, int | None]:
     """Classify Gemini text errors into retryable and non-retryable cases."""
 
     lowered = error_message.lower()
-    retry_after = _parse_retry_delay_seconds(error_message)
+    retry_after = parse_retry_delay_seconds(error_message)
 
     if "quota exceeded" in lowered or "billing details" in lowered:
         return False, (
@@ -140,14 +111,12 @@ def _classify_generation_error(error_message: str) -> tuple[bool, str, int | Non
 # -------------------------------
 @observe()
 def generate_article_from_news(keyword: str, news_list: list) -> dict:
-    """Generate an article from RSS headlines for a single keyword."""
+    """Generate an article from the news items already prepared for a keyword."""
 
     if not news_list:
         return {"article": "", "error": "No news available for article generation."}
 
-    filtered_news = filter_relevant_news(keyword, news_list)
-
-    headlines = "\n".join([f"- {n['title']}" for n in filtered_news])
+    headlines = "\n".join([f"- {n['title']}" for n in news_list])
 
     prompt = ARTICLE_PROMPT.format(
         keyword=keyword,

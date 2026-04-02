@@ -2,6 +2,8 @@ import pandas as pd
 from datetime import datetime
 import os
 
+from utils.keyword_utils import expand_keywords_with_modifiers, normalize_keyword
+
 
 def safe_read_excel(excel_path):
     """Read the keyword workbook safely and normalize expected columns."""
@@ -49,7 +51,7 @@ def load_keywords_with_dates(excel_path):
                 fetch_date = None
 
             keywords_data.append({
-                "keyword": str(keyword).strip(),
+                "keyword": normalize_keyword(keyword),
                 "fetch_date": fetch_date
             })
 
@@ -81,7 +83,7 @@ def add_keywords_to_excel(excel_path, new_keywords: list):
     added_count = 0
 
     for kw in new_keywords:
-        kw = str(kw).strip()
+        kw = normalize_keyword(kw)
         if kw and kw not in existing_keywords:
             new_row = pd.DataFrame([{"keyword": kw, "fetch_date": None}])
             df = pd.concat([df, new_row], ignore_index=True)
@@ -99,27 +101,13 @@ def remove_keyword_from_excel(excel_path, keyword: str):
 
     initial_len = len(df)
 
-    df = df[df["keyword"].astype(str).str.strip() != keyword.strip()]
+    df = df[df["keyword"].astype(str).str.strip() != normalize_keyword(keyword)]
 
     if len(df) < initial_len:
         df.to_excel(excel_path, index=False)
         return True
 
     return False
-
-
-def expand_keywords_with_modifiers(keywords: list) -> list:
-    """Expand each keyword with the default modifier set."""
-
-    modifiers = ["fall", "demand", "supply", "rise"]
-    expanded = []
-    for kw in keywords:
-        kw = str(kw).strip()
-        if not kw:
-            continue
-        for mod in modifiers:
-            expanded.append(f"{kw} {mod}")
-    return expanded
 
 def clean_keyword_series(series):
     """Normalize a pandas keyword series into stripped string values."""

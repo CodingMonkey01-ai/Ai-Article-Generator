@@ -1,4 +1,4 @@
-from utils.excel_loader import expand_keywords_with_modifiers
+from utils.keyword_utils import expand_keywords_with_modifiers, normalize_keywords
 from llm.gemini_text import generate_article_from_news
 from search.gemini_search import get_news_for_keyword
 from utils.postgres_store import add_keywords, save_document, update_keyword_fetch_date
@@ -7,18 +7,12 @@ from utils.postgres_store import add_keywords, save_document, update_keyword_fet
 def build_keywords(keywords: list[str], expand_modifiers: bool) -> list[str]:
     """Normalize keywords and optionally expand them with standard modifiers."""
 
-    cleaned = []
-    seen = set()
+    cleaned = normalize_keywords(keywords)
+    seen = set(cleaned)
 
-    for keyword in keywords:
-        value = str(keyword).strip()
-        if not value or value in seen:
-            continue
-        cleaned.append(value)
-        seen.add(value)
-
-        if expand_modifiers:
-            for expanded in expand_keywords_with_modifiers([value]):
+    if expand_modifiers:
+        for keyword in list(cleaned):
+            for expanded in expand_keywords_with_modifiers([keyword]):
                 if expanded not in seen:
                     cleaned.append(expanded)
                     seen.add(expanded)

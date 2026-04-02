@@ -4,6 +4,7 @@ import time
 from google import genai
 from langfuse import observe
 from config.settings import GEMINI_API_KEY
+from utils.retry_utils import parse_retry_delay_seconds
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 IMAGE_MODELS = [
@@ -21,21 +22,11 @@ def sanitize_filename(text: str) -> str:
     text = re.sub(r"\s+", "_", text)
     return text[:100]
 
-
-def _parse_retry_delay_seconds(error_message: str) -> int | None:
-    """Extract a retry delay in seconds from a provider error message."""
-
-    match = re.search(r"retry in ([\d.]+)s", error_message, flags=re.IGNORECASE)
-    if not match:
-        return None
-    return max(1, int(float(match.group(1))))
-
-
 def _classify_image_error(error_message: str, model: str) -> tuple[bool, str, int | None]:
     """Classify Gemini image errors into retryable and non-retryable cases."""
 
     lowered = error_message.lower()
-    retry_after = _parse_retry_delay_seconds(error_message)
+    retry_after = parse_retry_delay_seconds(error_message)
 
     if "not_found" in lowered or "is not found" in lowered or "not supported" in lowered:
         return False, f"Image model '{model}' is unavailable for this Gemini API setup.", None
